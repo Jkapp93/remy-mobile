@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Location from 'expo-location';
+import * as Speech from 'expo-speech';
 import * as SecureStore from 'expo-secure-store';
 
 const API_URL = 'https://remy-nu.vercel.app';
@@ -43,11 +44,15 @@ export default function App() {
   const [doctrine, setDoctrine] = useState('');
   const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [gpsEnabled, setGpsEnabled] = useState(false);
+  const [continuousMode, setContinuousMode] = useState(false);
+  const [remyThinking, setRemyThinking] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const gpsIntervalRef = useRef<any>(null);
   const briefedJobsRef = useRef<Set<string>>(new Set());
+  const continuousRef = useRef(false);
+  const processingRef = useRef(false);
 
   useEffect(() => {
     setupAudio();
@@ -63,6 +68,77 @@ export default function App() {
     else stopGPS();
     return () => stopGPS();
   }, [gpsEnabled, jobs]);
+
+  useEffect(() => {
+    continuousRef.current = continuousMode;
+    if (continuousMode) startContinuousListening();
+    else stopContinuousListening();
+    return () => stopContinuousListening();
+  }, [continuousMode]);
+
+  const startContinuousListening = async () => {
+    if (processingRef.current) return;
+    try {
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      listenLoop();
+    } catch {}
+  };
+
+  const stopContinuousListening = async () => {
+    continuousRef.current = false;
+    if (recordingRef.current) {
+      try { await recordingRef.current.stopAndUnloadAsync(); } catch {}
+      recordingRef.current = null;
+    }
+    setIsRecording(false);
+  };
+
+  const listenLoop = async () => {
+    if (!continuousRef.current || processingRef.current) return;
+    try {
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      recordingRef.current = recording;
+      setIsRecording(true);
+      // Record for 4 seconds at a time
+      await new Promise(r => setTimeout(r, 4000));
+      if (!continuousRef.current) { await recording.stopAndUnloadAsync(); setIsRecording(false); return; }
+      await recording.stopAndUnloadAsync();
+      setIsRecording(false);
+      const uri = recording.getURI();
+      recordingRef.current = null;
+      if (uri) {
+        processingRef.current = true;
+        await processContinuousAudio(uri);
+        processingRef.current = false;
+      }
+      // Continue loop
+      if (continuousRef.current) setTimeout(listenLoop, 500);
+    } catch {
+      processingRef.current = false;
+      if (continuousRef.current) setTimeout(listenLoop, 2000);
+    }
+  };
+
+  const processContinuousAudio = async (uri: string) => {
+    try {
+      const formData = new FormData();
+      formData.append('audio', { uri, type: 'audio/m4a', name: 'recording.m4a' } as any);
+      const res = await fetch(`${API_URL}/api/transcribe`, { method: 'POST', body: formData });
+      const data = await res.json();
+      const text = (data.text || '').trim().toLowerCase();
+      if (!text || text.length < 3) return;
+      // Wake word detection
+      const hasWakeWord = text.includes('hey remy') || text.includes('remy') || text.startsWith('ok remy');
+      const cleanText = text.replace(/hey remy/gi, '').replace(/ok remy/gi, '').replace(/^remy\s*/gi, '').trim();
+      if (hasWakeWord && cleanText.length > 2) {
+        setRemyThinking(true);
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+        await sendMessage(cleanText, messages, doctrine, activeJob);
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+        setRemyThinking(false);
+      }
+    } catch {}
+  };
 
   const startGPS = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -311,12 +387,16 @@ export default function App() {
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setTab("voice")}><Text style={styles.logo}>Remy<Text style={{ color: COLORS.orange }}>.</Text></Text></TouchableOpacity>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {remyThinking && <Text style={[styles.statusText, { color: COLORS.orange }]}>Thinking...</Text>}
           {isSpeaking && (
             <TouchableOpacity onPress={stopSpeaking}>
               <Text style={[styles.statusText, { color: COLORS.green }]}>Speaking (stop)</Text>
             </TouchableOpacity>
           )}
-          {isRecording && <Text style={[styles.statusText, { color: COLORS.orange }]}>Listening...</Text>}
+          {isRecording && !continuousMode && <Text style={[styles.statusText, { color: COLORS.orange }]}>Listening...</Text>}
+          {continuousMode && !isSpeaking && !remyThinking && (
+            <Text style={[styles.statusText, { color: COLORS.green }]}>Always On</Text>
+          )}
           {activeJob && (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <View style={styles.jobPill}>
@@ -413,6 +493,20 @@ export default function App() {
           <View style={styles.settingsCard}>
             <Text style={styles.settingsLabel}>JOBS LOADED</Text>
             <Text style={styles.settingsValue}>{jobs.length}</Text>
+          </View>
+          <View style={[styles.settingsCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
+            <View>
+              <Text style={styles.settingsLabel}>ALWAYS-ON MODE</Text>
+              <Text style={[styles.settingsValue, { fontSize: 12, color: COLORS.textFaint }]}>Say "Hey Remy" to activate</Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setContinuousMode(!continuousMode)}
+              style={{ backgroundColor: continuousMode ? COLORS.orange : 'rgba(255,255,255,0.06)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 }}
+            >
+              <Text style={{ color: continuousMode ? '#fff' : COLORS.textDim, fontSize: 13, fontWeight: '600' }}>
+                {continuousMode ? 'ON' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
           </View>
           <View style={[styles.settingsCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
             <View>
