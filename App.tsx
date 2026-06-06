@@ -80,6 +80,7 @@ export default function App() {
       playsInSilentModeIOS: true,
       shouldDuckAndroid: true,
       staysActiveInBackground: true,
+      playThroughEarpieceAndroid: false,
     });
   };
 
@@ -290,7 +291,11 @@ export default function App() {
   const startRecording = async () => {
     try {
       if (isSpeaking) await stopSpeaking();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      await Audio.setAudioModeAsync({ 
+        allowsRecordingIOS: true, 
+        playsInSilentModeIOS: true,
+        playThroughEarpieceAndroid: false,
+      });
       const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       recordingRef.current = recording;
       setIsRecording(true);
@@ -306,7 +311,11 @@ export default function App() {
     setIsRecording(false);
     try {
       await recordingRef.current.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      await Audio.setAudioModeAsync({ 
+        allowsRecordingIOS: false, 
+        playsInSilentModeIOS: true,
+        playThroughEarpieceAndroid: false,
+      });
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
       if (uri) await transcribeAudio(uri);
