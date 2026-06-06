@@ -6,26 +6,33 @@ import {
 } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Location from 'expo-location';
-import * as Speech from 'expo-speech';
 import * as SecureStore from 'expo-secure-store';
 
 const API_URL = 'https://remy-nu.vercel.app';
 
+const VOICES = [
+  { id: 'f786b574-daa5-4673-aa0c-cbe3e8534c02', name: 'Remy' },
+  { id: '30894953-bcce-41fe-892c-15ce19c843ff', name: 'Parker' },
+  { id: '692846ad-1a6b-49b8-bfc5-86421fd41a19', name: 'Thandi' },
+  { id: 'ed9ccfa4-8fa1-40f8-bfb2-cb7d67d2f9cd', name: 'Ruby' },
+  { id: 'ef191366-f52f-447a-a398-ed8c0f2943a1', name: 'Archie' },
+  { id: '34575e71-908f-4ab6-ab54-b08c95d6597d', name: 'Joey' },
+];
+
+const JOB_TYPE_COLORS: Record<string, string> = {
+  roofing: '#f07a2e', fencing: '#4a9fd4', hvac: '#3daf76',
+  painting: '#9b59b6', plumbing: '#e74c3c', solar: '#f1c40f',
+  restoration: '#e67e22', other: '#7a8fa4',
+};
+
 const COLORS = {
-  bg: '#0b0f14',
-  bg2: '#111820',
-  border: 'rgba(255,255,255,0.07)',
-  orange: '#f07a2e',
-  orangeDim: 'rgba(240,122,46,0.1)',
-  orangeBorder: 'rgba(240,122,46,0.25)',
-  text: '#e8edf2',
-  textDim: '#7a8fa4',
-  textFaint: '#2d3f52',
-  green: '#3daf76',
+  bg: '#0b0f14', bg2: '#111820', border: 'rgba(255,255,255,0.07)',
+  orange: '#f07a2e', orangeDim: 'rgba(240,122,46,0.1)', orangeBorder: 'rgba(240,122,46,0.25)',
+  text: '#e8edf2', textDim: '#7a8fa4', textFaint: '#2d3f52', green: '#3daf76',
 };
 
 type Message = { role: 'user' | 'assistant'; content: string };
-type Job = { id: string; customer_name: string; address: string; notes: string; status: string };
+type Job = { id: string; customer_name: string; address: string; notes: string; status: string; job_type: string };
 type Tab = 'voice' | 'jobs' | 'settings';
 
 export default function App() {
@@ -42,21 +49,18 @@ export default function App() {
   const [token, setToken] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
   const [doctrine, setDoctrine] = useState('');
-  const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [gpsEnabled, setGpsEnabled] = useState(false);
-  const [continuousMode, setContinuousMode] = useState(false);
-  const [remyThinking, setRemyThinking] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState(VOICES[0].id);
   const scrollRef = useRef<ScrollView>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const gpsIntervalRef = useRef<any>(null);
   const briefedJobsRef = useRef<Set<string>>(new Set());
-  const continuousRef = useRef(false);
-  const processingRef = useRef(false);
 
   useEffect(() => {
     setupAudio();
     loadSavedToken();
+    loadSavedVoice();
   }, []);
 
   useEffect(() => {
@@ -69,75 +73,60 @@ export default function App() {
     return () => stopGPS();
   }, [gpsEnabled, jobs]);
 
-  useEffect(() => {
-    continuousRef.current = continuousMode;
-    if (continuousMode) startContinuousListening();
-    else stopContinuousListening();
-    return () => stopContinuousListening();
-  }, [continuousMode]);
-
-  const startContinuousListening = async () => {
-    if (processingRef.current) return;
-    try {
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      listenLoop();
-    } catch {}
+  const setupAudio = async () => {
+    await Audio.requestPermissionsAsync();
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      shouldDuckAndroid: true,
+      staysActiveInBackground: true,
+    });
   };
 
-  const stopContinuousListening = async () => {
-    continuousRef.current = false;
-    if (recordingRef.current) {
-      try { await recordingRef.current.stopAndUnloadAsync(); } catch {}
-      recordingRef.current = null;
-    }
-    setIsRecording(false);
+  const loadSavedVoice = async () => {
+    const saved = await SecureStore.getItemAsync('remy_voice');
+    if (saved) setSelectedVoice(saved);
   };
 
-  const listenLoop = async () => {
-    if (!continuousRef.current || processingRef.current) return;
+  const saveVoice = async (id: string) => {
+    setSelectedVoice(id);
+    await SecureStore.setItemAsync('remy_voice', id);
+  };
+
+  const loadSavedToken = async () => {
+    const saved = await SecureStore.getItemAsync('remy_token');
+    if (saved) { setToken(saved); loadData(); }
+    else setShowLogin(true);
+  };
+
+  const login = async () => {
+    const t = `${email}_${Date.now()}`;
+    await SecureStore.setItemAsync('remy_token', t);
+    setToken(t);
+    setShowLogin(false);
+    loadData();
+  };
+
+  const logout = async () => {
+    await SecureStore.deleteItemAsync('remy_token');
+    setToken(null);
+    setMessages([]);
+    setActiveJob(null);
+    setShowLogin(true);
+  };
+
+  const loadData = async () => {
     try {
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      recordingRef.current = recording;
-      setIsRecording(true);
-      // Record for 4 seconds at a time
-      await new Promise(r => setTimeout(r, 4000));
-      if (!continuousRef.current) { await recording.stopAndUnloadAsync(); setIsRecording(false); return; }
-      await recording.stopAndUnloadAsync();
-      setIsRecording(false);
-      const uri = recording.getURI();
-      recordingRef.current = null;
-      if (uri) {
-        processingRef.current = true;
-        await processContinuousAudio(uri);
-        processingRef.current = false;
-      }
-      // Continue loop
-      if (continuousRef.current) setTimeout(listenLoop, 500);
+      const [jobData, docData] = await Promise.all([
+        fetch(`${API_URL}/api/jobs`).then(r => r.json()).catch(() => ({ jobs: [] })),
+        fetch(`${API_URL}/api/doctrine-list`).then(r => r.json()).catch(() => ({ doctrine: '' })),
+      ]);
+      if (jobData.jobs) setJobs(jobData.jobs);
+      if (docData.doctrine) setDoctrine(docData.doctrine);
+      setMessages([{ role: 'assistant', content: `Hey. I am Remy. ${jobData.jobs?.length > 0 ? `${jobData.jobs.length} active job${jobData.jobs.length > 1 ? 's' : ''} loaded. Select a job and tap Brief Me when you are ready.` : 'No active jobs yet. Add jobs from the web dashboard.'}` }]);
     } catch {
-      processingRef.current = false;
-      if (continuousRef.current) setTimeout(listenLoop, 2000);
+      setMessages([{ role: 'assistant', content: `Hey. I am Remy. Ready when you are.` }]);
     }
-  };
-
-  const processContinuousAudio = async (uri: string) => {
-    try {
-      const formData = new FormData();
-      formData.append('audio', { uri, type: 'audio/m4a', name: 'recording.m4a' } as any);
-      const res = await fetch(`${API_URL}/api/transcribe`, { method: 'POST', body: formData });
-      const data = await res.json();
-      const text = (data.text || '').trim().toLowerCase();
-      if (!text || text.length < 3) return;
-      // Wake word detection
-      const hasWakeWord = text.includes('hey remy') || text.includes('remy') || text.startsWith('ok remy');
-      const cleanText = text.replace(/hey remy/gi, '').replace(/ok remy/gi, '').replace(/^remy\s*/gi, '').trim();
-      if (hasWakeWord && cleanText.length > 2) {
-        setRemyThinking(true);
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-        await sendMessage(cleanText, messages, doctrine, activeJob);
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-        setRemyThinking(false);
-      }
-    } catch {}
   };
 
   const startGPS = async () => {
@@ -165,20 +154,18 @@ export default function App() {
 
   const checkNearbyJobs = async (userLat: number, userLng: number) => {
     for (const job of jobs) {
-      if (briefedJobsRef.current.has(job.id)) continue;
-      // Try to geocode the address
+      if (briefedJobsRef.current.has(job.id) || !job.address) continue;
       try {
-        const geo = await Location.geocodeAsync(job.address || '');
-        if (geo.length > 0) {
-          const dist = getDistance(userLat, userLng, geo[0].latitude, geo[0].longitude);
+        const geoRes = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(job.address)}&key=${process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY}`);
+        const geoData = await geoRes.json();
+        if (geoData.results?.[0]) {
+          const { lat, lng } = geoData.results[0].geometry.location;
+          const dist = getDistance(userLat, userLng, lat, lng);
           if (dist <= 400) {
             briefedJobsRef.current.add(job.id);
             setActiveJob(job);
             setTab('voice');
-            sendMessage(
-              `I am pulling up to ${job.customer_name}${job.address ? ` at ${job.address}` : ''}. Auto-detected via GPS. Brief me fast.`,
-              messages, doctrine, job
-            );
+            sendMessage(`I am pulling up to ${job.customer_name}${job.address ? ` at ${job.address}` : ''}. Auto-detected via GPS. Brief me fast before I knock.`, messages, doctrine, job);
             break;
           }
         }
@@ -186,76 +173,9 @@ export default function App() {
     }
   };
 
-  const setupAudio = async () => {
-    await Audio.requestPermissionsAsync();
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-      shouldDuckAndroid: true,
-      staysActiveInBackground: true,
-    });
-  };
-
-  const unlockAudio = async () => {
-    if (audioUnlocked) return;
-    try {
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: `${API_URL}/silence.mp3` },
-        { shouldPlay: true, volume: 0 }
-      );
-      await sound.unloadAsync();
-      setAudioUnlocked(true);
-    } catch { setAudioUnlocked(true); }
-  };
-
-  const loadSavedToken = async () => {
-    const saved = await SecureStore.getItemAsync('remy_token');
-    if (saved) { setToken(saved); loadData(); }
-    else setShowLogin(true);
-  };
-
-  const login = async () => {
-    await unlockAudio();
-    const t = `${email}_${Date.now()}`;
-    await SecureStore.setItemAsync('remy_token', t);
-    setToken(t);
-    setShowLogin(false);
-    loadData();
-  };
-
-  const logout = async () => {
-    await SecureStore.deleteItemAsync('remy_token');
-    setToken(null);
-    setShowLogin(true);
-    setMessages([]);
-    setActiveJob(null);
-  };
-
-  const loadData = async () => {
-    try {
-      const [jobData, docData] = await Promise.all([
-        fetch(`${API_URL}/api/jobs`).then(r => r.json()).catch(() => ({ jobs: [] })),
-        fetch(`${API_URL}/api/doctrine-list`).then(r => r.json()).catch(() => ({ doctrine: '' })),
-      ]);
-      if (jobData.jobs) setJobs(jobData.jobs);
-      if (docData.doctrine) setDoctrine(docData.doctrine);
-      if (jobData.jobs?.length > 0) {
-        const jobList = jobData.jobs.slice(0, 3).map((j: Job) => j.customer_name).join(', ');
-        await sendMessage(
-          `Brief me on my day. I have ${jobData.jobs.length} active job${jobData.jobs.length > 1 ? 's' : ''}: ${jobList}.`,
-          [], docData.doctrine || '', null
-        );
-      } else {
-        setMessages([{ role: 'assistant', content: `Hey. I am Remy. No active jobs yet. Tap Jobs below to add one, or just tell me what you are walking into.` }]);
-      }
-    } catch {
-      setMessages([{ role: 'assistant', content: `Hey. I am Remy. Ready when you are.` }]);
-    }
-  };
-
   const sendMessage = async (text: string, currentMessages: Message[], currentDoctrine: string, currentJob: Job | null) => {
     if (!text.trim()) return;
-    const jobContext = currentJob ? `Customer: ${currentJob.customer_name}\nAddress: ${currentJob.address || 'Not provided'}\nNotes: ${currentJob.notes || 'None'}` : '';
+    const jobContext = currentJob ? `Customer: ${currentJob.customer_name}\nAddress: ${currentJob.address || 'Not provided'}\nNotes: ${currentJob.notes || 'None'}\nJob type: ${currentJob.job_type || 'General'}` : '';
     const newMessages: Message[] = [...currentMessages, { role: 'user', content: text }];
     setMessages(newMessages);
     setInput('');
@@ -283,7 +203,7 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/voice`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, voiceId: selectedVoice }),
       });
       if (!res.ok) { setIsSpeaking(false); return; }
       const blob = await res.blob();
@@ -297,11 +217,7 @@ export default function App() {
           );
           soundRef.current = sound;
           sound.setOnPlaybackStatusUpdate((status) => {
-            if (status.isLoaded && status.didJustFinish) {
-              setIsSpeaking(false);
-              sound.unloadAsync();
-              soundRef.current = null;
-            }
+            if (status.isLoaded && status.didJustFinish) { setIsSpeaking(false); sound.unloadAsync(); soundRef.current = null; }
           });
         } catch { setIsSpeaking(false); }
       };
@@ -316,7 +232,6 @@ export default function App() {
 
   const startRecording = async () => {
     try {
-      await unlockAudio();
       if (isSpeaking) await stopSpeaking();
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
       const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
@@ -349,26 +264,36 @@ export default function App() {
     } catch { setLoading(false); }
   };
 
-  const selectJob = async (job: Job) => {
-    await unlockAudio();
+  const selectJob = (job: Job) => {
     setActiveJob(job);
     setTab('voice');
-    await sendMessage(
-      `Brief me fast. Pulling up to ${job.customer_name}${job.address ? ` at ${job.address}` : ''}${job.notes ? `. Notes: ${job.notes}` : ''}.`,
-      messages, doctrine, job
+    setMessages(prev => [...prev, { role: 'assistant', content: `Job loaded: ${job.customer_name}${job.address ? ` at ${job.address}` : ''}. Tap Brief Me when you are ready.` }]);
+  };
+
+  const briefActiveJob = () => {
+    if (!activeJob) return;
+    sendMessage(
+      `Brief me fast. Pulling up to ${activeJob.customer_name}${activeJob.address ? ` at ${activeJob.address}` : ''}${activeJob.notes ? `. Notes: ${activeJob.notes}` : ''}.`,
+      messages, doctrine, activeJob
     );
+  };
+
+  const briefMyDay = () => {
+    if (jobs.length === 0) return;
+    const jobList = jobs.slice(0, 5).map(j => j.customer_name).join(', ');
+    sendMessage(`Brief me on my day. I have ${jobs.length} active jobs: ${jobList}.`, messages, doctrine, null);
   };
 
   const clearJob = () => {
     setActiveJob(null);
-    setMessages([{ role: 'assistant', content: `Job cleared. Tell me what you are walking into or select a new job.` }]);
+    setMessages(prev => [...prev, { role: 'assistant', content: 'Job cleared. Select a new job or ask me anything.' }]);
   };
 
   if (showLogin) {
     return (
       <SafeAreaView style={[styles.container, { justifyContent: 'center', padding: 24 }]}>
         <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
-        <TouchableOpacity onPress={() => setTab("voice")}><Text style={styles.logo}>Remy<Text style={{ color: COLORS.orange }}>.</Text></Text></TouchableOpacity>
+        <Text style={styles.logo}>Remy<Text style={{ color: COLORS.orange }}>.</Text></Text>
         <Text style={styles.loginSub}>Your AI field companion</Text>
         <TextInput style={styles.loginInput} placeholder="Email" placeholderTextColor={COLORS.textFaint} value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
         <TextInput style={styles.loginInput} placeholder="Password" placeholderTextColor={COLORS.textFaint} value={password} onChangeText={setPassword} secureTextEntry />
@@ -383,34 +308,46 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
 
-      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => setTab("voice")}><Text style={styles.logo}>Remy<Text style={{ color: COLORS.orange }}>.</Text></Text></TouchableOpacity>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          {remyThinking && <Text style={[styles.statusText, { color: COLORS.orange }]}>Thinking...</Text>}
+        <TouchableOpacity onPress={() => setTab('voice')}>
+          <Text style={styles.logo}>Remy<Text style={{ color: COLORS.orange }}>.</Text></Text>
+        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
           {isSpeaking && (
             <TouchableOpacity onPress={stopSpeaking}>
               <Text style={[styles.statusText, { color: COLORS.green }]}>Speaking (stop)</Text>
             </TouchableOpacity>
           )}
-          {isRecording && !continuousMode && <Text style={[styles.statusText, { color: COLORS.orange }]}>Listening...</Text>}
-          {continuousMode && !isSpeaking && !remyThinking && (
-            <Text style={[styles.statusText, { color: COLORS.green }]}>Always On</Text>
-          )}
-          {activeJob && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View style={styles.jobPill}>
-                <Text style={styles.jobPillText} numberOfLines={1}>{activeJob.customer_name}</Text>
+          {isRecording && <Text style={[styles.statusText, { color: COLORS.orange }]}>Listening...</Text>}
+          {activeJob && !isSpeaking && !isRecording && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <View style={[styles.jobPill, { borderColor: (JOB_TYPE_COLORS[activeJob.job_type] || COLORS.orange) + '44' }]}>
+                <Text style={[styles.jobPillText, { color: JOB_TYPE_COLORS[activeJob.job_type] || COLORS.orange }]} numberOfLines={1}>{activeJob.customer_name}</Text>
               </View>
-              <TouchableOpacity onPress={clearJob} style={styles.clearBtn}>
-                <Text style={styles.clearBtnText}>x</Text>
-              </TouchableOpacity>
+              <TouchableOpacity onPress={clearJob} style={styles.clearBtn}><Text style={styles.clearBtnText}>x</Text></TouchableOpacity>
             </View>
           )}
         </View>
       </View>
 
-      {/* Tab Content */}
+      {/* Brief buttons */}
+      {tab === 'voice' && !isSpeaking && !isRecording && (
+        <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: COLORS.border }}>
+          {activeJob ? (
+            <TouchableOpacity onPress={briefActiveJob} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: COLORS.orangeDim, borderWidth: 1, borderColor: COLORS.orangeBorder }}>
+              <Text style={{ color: COLORS.orange, fontSize: 12, fontWeight: '600' }}>Brief Me</Text>
+            </TouchableOpacity>
+          ) : jobs.length > 0 ? (
+            <TouchableOpacity onPress={briefMyDay} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: 'rgba(61,175,118,0.1)', borderWidth: 1, borderColor: 'rgba(61,175,118,0.25)' }}>
+              <Text style={{ color: COLORS.green, fontSize: 12, fontWeight: '600' }}>Brief My Day</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity onPress={() => setTab('jobs')} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: COLORS.bg2, borderWidth: 1, borderColor: COLORS.border }}>
+            <Text style={{ color: COLORS.textDim, fontSize: 12, fontWeight: '500' }}>{activeJob ? 'Change Job' : '+ Select Job'}</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {tab === 'voice' && (
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView ref={scrollRef} style={styles.messages} contentContainerStyle={{ padding: 16, gap: 12 }}>
@@ -433,17 +370,7 @@ export default function App() {
             <TouchableOpacity style={[styles.micBtn, isRecording && styles.micBtnActive]} onPress={isRecording ? stopRecording : startRecording}>
               <Text style={[styles.micBtnText, isRecording && { color: '#fff' }]}>{isRecording ? 'Stop' : 'Mic'}</Text>
             </TouchableOpacity>
-            <TextInput
-              style={styles.textInput}
-              value={input}
-              onChangeText={setInput}
-              placeholder={isRecording ? 'Listening...' : 'Type or tap mic...'}
-              placeholderTextColor={COLORS.textFaint}
-              onSubmitEditing={() => sendMessage(input, messages, doctrine, activeJob)}
-              onFocus={unlockAudio}
-              returnKeyType="send"
-              editable={!isRecording}
-            />
+            <TextInput style={styles.textInput} value={input} onChangeText={setInput} placeholder={isRecording ? 'Listening...' : 'Type or tap mic...'} placeholderTextColor={COLORS.textFaint} onSubmitEditing={() => sendMessage(input, messages, doctrine, activeJob)} returnKeyType="send" editable={!isRecording} />
             <TouchableOpacity style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]} onPress={() => sendMessage(input, messages, doctrine, activeJob)} disabled={!input.trim() || loading}>
               <Text style={styles.sendBtnText}>Send</Text>
             </TouchableOpacity>
@@ -454,25 +381,30 @@ export default function App() {
       {tab === 'jobs' && (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20 }}>
           <Text style={styles.tabTitle}>Active Jobs</Text>
-          <Text style={styles.tabSub}>Tap a job to brief with Remy</Text>
+          <Text style={styles.tabSub}>Tap a job to load it, then tap Brief Me</Text>
           {jobs.length === 0 ? (
             <View style={styles.emptyState}>
-              <Text style={styles.emptyStateText}>No active jobs. Add jobs from the web dashboard at remy-nu.vercel.app</Text>
+              <Text style={styles.emptyStateText}>No active jobs. Add from the web dashboard at remy-nu.vercel.app</Text>
             </View>
-          ) : (
-            jobs.map(job => (
-              <TouchableOpacity key={job.id} style={[styles.jobCard, activeJob?.id === job.id && styles.jobCardActive]} onPress={() => selectJob(job)}>
+          ) : jobs.map(job => {
+            const color = JOB_TYPE_COLORS[job.job_type] || COLORS.orange;
+            return (
+              <TouchableOpacity key={job.id} style={[styles.jobCard, activeJob?.id === job.id && { borderColor: color + '66', backgroundColor: color + '11' }]} onPress={() => selectJob(job)}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.jobCardName}>{job.customer_name}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+                    <Text style={styles.jobCardName}>{job.customer_name}</Text>
+                    <Text style={{ fontSize: 10, color, fontWeight: '600', textTransform: 'uppercase' }}>{job.job_type}</Text>
+                  </View>
                   {job.address ? <Text style={styles.jobCardAddr}>{job.address}</Text> : null}
-                  {job.notes ? <Text style={styles.jobCardNotes} numberOfLines={2}>{job.notes}</Text> : null}
+                  {job.notes ? <Text style={styles.jobCardNotes} numberOfLines={1}>{job.notes}</Text> : null}
                 </View>
-                <View style={styles.jobCardBtn}>
-                  <Text style={styles.jobCardBtnText}>Brief</Text>
+                <View style={[styles.jobCardBtn, { borderColor: color + '44' }]}>
+                  <Text style={[styles.jobCardBtnText, { color }]}>Load</Text>
                 </View>
               </TouchableOpacity>
-            ))
-          )}
+            );
+          })}
           <TouchableOpacity style={styles.refreshBtn} onPress={loadData}>
             <Text style={styles.refreshBtnText}>Refresh Jobs</Text>
           </TouchableOpacity>
@@ -482,46 +414,38 @@ export default function App() {
       {tab === 'settings' && (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20 }}>
           <Text style={styles.tabTitle}>Settings</Text>
+
           <View style={styles.settingsCard}>
-            <Text style={styles.settingsLabel}>WEB DASHBOARD</Text>
-            <Text style={styles.settingsValue}>remy-nu.vercel.app</Text>
-          </View>
-          <View style={styles.settingsCard}>
-            <Text style={styles.settingsLabel}>ACTIVE JOB</Text>
-            <Text style={styles.settingsValue}>{activeJob ? activeJob.customer_name : 'None'}</Text>
-          </View>
-          <View style={styles.settingsCard}>
-            <Text style={styles.settingsLabel}>JOBS LOADED</Text>
-            <Text style={styles.settingsValue}>{jobs.length}</Text>
-          </View>
-          <View style={[styles.settingsCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
-            <View>
-              <Text style={styles.settingsLabel}>ALWAYS-ON MODE</Text>
-              <Text style={[styles.settingsValue, { fontSize: 12, color: COLORS.textFaint }]}>Say "Hey Remy" to activate</Text>
+            <Text style={styles.settingsLabel}>REMY VOICE</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+              {VOICES.map(v => (
+                <TouchableOpacity key={v.id} onPress={() => saveVoice(v.id)} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: selectedVoice === v.id ? COLORS.orange : COLORS.bg, borderWidth: 1, borderColor: selectedVoice === v.id ? COLORS.orange : COLORS.border }}>
+                  <Text style={{ color: selectedVoice === v.id ? '#fff' : COLORS.textDim, fontSize: 13, fontWeight: '500' }}>{v.name}</Text>
+                </TouchableOpacity>
+              ))}
             </View>
-            <TouchableOpacity
-              onPress={() => setContinuousMode(!continuousMode)}
-              style={{ backgroundColor: continuousMode ? COLORS.orange : 'rgba(255,255,255,0.06)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 }}
-            >
-              <Text style={{ color: continuousMode ? '#fff' : COLORS.textDim, fontSize: 13, fontWeight: '600' }}>
-                {continuousMode ? 'ON' : 'OFF'}
-              </Text>
-            </TouchableOpacity>
           </View>
+
           <View style={[styles.settingsCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
             <View>
               <Text style={styles.settingsLabel}>GPS AUTO-BRIEF</Text>
               <Text style={[styles.settingsValue, { fontSize: 12, color: COLORS.textFaint }]}>Auto-brief when near job address</Text>
             </View>
-            <TouchableOpacity
-              onPress={() => setGpsEnabled(!gpsEnabled)}
-              style={{ backgroundColor: gpsEnabled ? COLORS.orange : 'rgba(255,255,255,0.06)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 }}
-            >
-              <Text style={{ color: gpsEnabled ? '#fff' : COLORS.textDim, fontSize: 13, fontWeight: '600' }}>
-                {gpsEnabled ? 'ON' : 'OFF'}
-              </Text>
+            <TouchableOpacity onPress={() => setGpsEnabled(!gpsEnabled)} style={{ backgroundColor: gpsEnabled ? COLORS.orange : 'rgba(255,255,255,0.06)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 }}>
+              <Text style={{ color: gpsEnabled ? '#fff' : COLORS.textDim, fontSize: 13, fontWeight: '600' }}>{gpsEnabled ? 'ON' : 'OFF'}</Text>
             </TouchableOpacity>
           </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>ACTIVE JOB</Text>
+            <Text style={styles.settingsValue}>{activeJob ? activeJob.customer_name : 'None'}</Text>
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>JOBS LOADED</Text>
+            <Text style={styles.settingsValue}>{jobs.length}</Text>
+          </View>
+
           <TouchableOpacity style={styles.refreshBtn} onPress={loadData}>
             <Text style={styles.refreshBtnText}>Refresh Data</Text>
           </TouchableOpacity>
@@ -531,7 +455,6 @@ export default function App() {
         </ScrollView>
       )}
 
-      {/* Bottom Tab Bar */}
       <View style={styles.tabBar}>
         {(['voice', 'jobs', 'settings'] as Tab[]).map(t => (
           <TouchableOpacity key={t} style={styles.tabBtn} onPress={() => setTab(t)}>
@@ -550,8 +473,8 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 14, borderBottomWidth: 1, borderBottomColor: COLORS.border, backgroundColor: 'rgba(11,15,20,0.98)' },
   logo: { fontSize: 20, fontWeight: '800', color: COLORS.text, letterSpacing: -0.5 },
   statusText: { fontSize: 11, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase' },
-  jobPill: { backgroundColor: COLORS.orangeDim, borderWidth: 1, borderColor: COLORS.orangeBorder, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, maxWidth: 120 },
-  jobPillText: { color: COLORS.orange, fontSize: 11, fontWeight: '500' },
+  jobPill: { backgroundColor: COLORS.orangeDim, borderWidth: 1, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4, maxWidth: 120 },
+  jobPillText: { fontSize: 11, fontWeight: '500' },
   clearBtn: { width: 20, height: 20, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
   clearBtnText: { color: COLORS.textDim, fontSize: 11 },
   messages: { flex: 1 },
@@ -575,26 +498,23 @@ const styles = StyleSheet.create({
   sendBtnText: { color: '#fff', fontSize: 14, fontWeight: '500' },
   textInput: { flex: 1, backgroundColor: COLORS.bg2, borderWidth: 1, borderColor: COLORS.border, borderRadius: 24, paddingHorizontal: 16, paddingVertical: 12, color: COLORS.text, fontSize: 16 },
   tabBar: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: COLORS.border, backgroundColor: 'rgba(11,15,20,0.98)', paddingBottom: Platform.OS === 'ios' ? 8 : 0 },
-  tabBtn: { flex: 1, alignItems: 'center', paddingVertical: 10 },
-  tabIcon: { fontSize: 10, fontWeight: '700', letterSpacing: 0.5, color: COLORS.textFaint, marginBottom: 3 },
-  tabIconActive: { color: COLORS.orange },
-  tabLabel: { fontSize: 11, color: COLORS.textFaint, fontWeight: '500' },
-  tabLabelActive: { color: COLORS.orange },
+  tabBtn: { flex: 1, alignItems: 'center', paddingVertical: 12 },
+  tabLabel: { fontSize: 12, color: COLORS.textFaint, fontWeight: '500' },
+  tabLabelActive: { color: COLORS.orange, fontWeight: '600' },
   tabTitle: { fontSize: 22, fontWeight: '800', color: COLORS.text, marginBottom: 6, letterSpacing: -0.5 },
   tabSub: { fontSize: 13, color: COLORS.textDim, marginBottom: 20, fontWeight: '300' },
   emptyState: { backgroundColor: COLORS.bg2, borderRadius: 12, padding: 24, alignItems: 'center' },
   emptyStateText: { color: COLORS.textFaint, fontSize: 13, textAlign: 'center', lineHeight: 20 },
   jobCard: { backgroundColor: COLORS.bg2, borderWidth: 1, borderColor: COLORS.border, borderRadius: 12, padding: 16, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  jobCardActive: { borderColor: COLORS.orangeBorder, backgroundColor: COLORS.orangeDim },
-  jobCardName: { fontSize: 15, fontWeight: '600', color: COLORS.text, marginBottom: 3 },
-  jobCardAddr: { fontSize: 12, color: COLORS.textDim },
+  jobCardName: { fontSize: 15, fontWeight: '600', color: COLORS.text },
+  jobCardAddr: { fontSize: 12, color: COLORS.textDim, marginTop: 2 },
   jobCardNotes: { fontSize: 12, color: COLORS.textFaint, marginTop: 4 },
-  jobCardBtn: { backgroundColor: COLORS.orangeDim, borderWidth: 1, borderColor: COLORS.orangeBorder, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8 },
-  jobCardBtnText: { color: COLORS.orange, fontSize: 13, fontWeight: '600' },
+  jobCardBtn: { backgroundColor: COLORS.orangeDim, borderWidth: 1, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8 },
+  jobCardBtnText: { fontSize: 13, fontWeight: '600' },
   refreshBtn: { backgroundColor: 'rgba(255,255,255,0.04)', borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, padding: 14, alignItems: 'center', marginTop: 16 },
   refreshBtnText: { color: COLORS.textDim, fontSize: 14, fontWeight: '500' },
   settingsCard: { backgroundColor: COLORS.bg2, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, padding: 16, marginBottom: 10 },
-  settingsLabel: { fontSize: 10, fontWeight: '600', letterSpacing: 1, color: COLORS.textFaint, textTransform: 'uppercase', marginBottom: 6 },
+  settingsLabel: { fontSize: 10, fontWeight: '600', letterSpacing: 1, color: COLORS.textFaint, textTransform: 'uppercase', marginBottom: 4 },
   settingsValue: { fontSize: 14, color: COLORS.text },
   loginInput: { backgroundColor: COLORS.bg2, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, padding: 14, color: COLORS.text, fontSize: 16, marginBottom: 12 },
   loginBtn: { backgroundColor: COLORS.orange, borderRadius: 10, padding: 15, alignItems: 'center', marginTop: 8 },
