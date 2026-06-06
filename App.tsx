@@ -129,13 +129,16 @@ export default function App() {
     }
   };
 
+  const atJobRef = useRef<{job: Job; arrivedAt: number; lat: number; lng: number} | null>(null);
+  const departedJobsRef = useRef<Set<string>>(new Set());
+
   const startGPS = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') { setGpsEnabled(false); Alert.alert('GPS needed', 'Enable location to use auto-brief.'); return; }
     gpsIntervalRef.current = setInterval(async () => {
       try {
         const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        checkNearbyJobs(loc.coords.latitude, loc.coords.longitude);
+        await processLocation(loc.coords.latitude, loc.coords.longitude);
       } catch {}
     }, 15000);
   };
@@ -152,25 +155,79 @@ export default function App() {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   };
 
-  const checkNearbyJobs = async (userLat: number, userLng: number) => {
+  const geocodeAddress = async (address: string): Promise<{lat: number; lng: number} | null> => {
+    try {
+      const res = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=AIzaSyAKYAeRgXOh0tooiOeimdZMT0p0b0HiLdg`);
+      const data = await res.json();
+      if (data.results?.[0]) return data.results[0].geometry.location;
+    } catch {}
+    return null;
+  };
+
+  const getNearbyFood = async (lat: number, lng: number): Promise<string> => {
+    try {
+      const res = await fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=3000&type=restaurant&key=AIzaSyAKYAeRgXOh0tooiOeimdZMT0p0b0HiLdg`);
+      const data = await res.json();
+      const places = data.results?.slice(0, 3).map((p: any) => `${p.name} (${p.vicinity})`).join(', ');
+      return places || '';
+    } catch { return ''; }
+  };
+
+  const processLocation = async (userLat: number, userLng: number) => {
+    const hour = new Date().getHours();
+
+    // Check if near any job
     for (const job of jobs) {
-      if (briefedJobsRef.current.has(job.id) || !job.address) continue;
-      try {
-        const geoRes = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(job.address)}&key=${process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY}`);
-        const geoData = await geoRes.json();
-        if (geoData.results?.[0]) {
-          const { lat, lng } = geoData.results[0].geometry.location;
-          const dist = getDistance(userLat, userLng, lat, lng);
-          if (dist <= 400) {
-            briefedJobsRef.current.add(job.id);
-            setActiveJob(job);
-            setTab('voice');
-            sendMessage(`I am pulling up to ${job.customer_name}${job.address ? ` at ${job.address}` : ''}. Auto-detected via GPS. Brief me fast before I knock.`, messages, doctrine, job);
-            break;
-          }
+      if (!job.address) continue;
+      const coords = await geocodeAddress(job.address);
+      if (!coords) continue;
+      const dist = getDistance(userLat, userLng, coords.lat, coords.lng);
+
+      // Arrived at job
+      if (dist <= 400 && !briefedJobsRef.current.has(job.id)) {
+        briefedJobsRef.current.add(job.id);
+        atJobRef.current = { job, arrivedAt: Date.now(), lat: coords.lat, lng: coords.lng };
+        setActiveJob(job);
+        setTab('voice');
+        sendMessage(
+          `I am pulling up to ${job.customer_name} at ${job.address}. Auto-detected via GPS. Brief me fast.`,
+          messages, doctrine, job
+        );
+        return;
+      }
+
+      // Departed job â€” was at job, now more than 600m away
+      if (atJobRef.current?.job.id === job.id && dist > 600 && !departedJobsRef.current.has(job.id)) {
+        departedJobsRef.current.add(job.id);
+        const timeAtJob = Math.round((Date.now() - atJobRef.current.arrivedAt) / 60000);
+        atJobRef.current = null;
+
+        // Find next job
+        const nextJob = jobs.find(j => j.id !== job.id && !departedJobsRef.current.has(j.id));
+
+        // Only suggest food during lunch hours (10am - 2pm) with enough gap
+        if (hour >= 10 && hour <= 14) {
+          const food = await getNearbyFood(userLat, userLng);
+          const nextJobText = nextJob ? ` Your next stop is ${nextJob.customer_name}.` : ' You have no more jobs loaded.';
+          const foodText = food ? ` Nearby options: ${food}.` : '';
+          sendMessage(
+            `Just left ${job.customer_name} after ${timeAtJob} minutes on site.${nextJobText}${foodText} What do you need?`,
+            messages, doctrine, nextJob || null
+          );
+        } else {
+          const nextJobText = nextJob ? `Next up is ${nextJob.customer_name} at ${nextJob.address}.` : 'No more jobs loaded.';
+          sendMessage(
+            `Left ${job.customer_name}.${nextJobText} Ready when you are.`,
+            messages, doctrine, nextJob || null
+          );
         }
-      } catch {}
+        return;
+      }
     }
+  };
+
+  const checkNearbyJobs = async (userLat: number, userLng: number) => {
+    await processLocation(userLat, userLng);
   };
 
   const sendMessage = async (text: string, currentMessages: Message[], currentDoctrine: string, currentJob: Job | null) => {
