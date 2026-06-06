@@ -237,6 +237,10 @@ export default function App() {
       const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       recordingRef.current = recording;
       setIsRecording(true);
+      // Auto-stop after 8 seconds
+      setTimeout(async () => {
+        if (recordingRef.current) await stopRecording();
+      }, 8000);
     } catch { Alert.alert('Error', 'Could not start recording.'); }
   };
 
@@ -368,7 +372,7 @@ export default function App() {
           </ScrollView>
           <View style={styles.inputBar}>
             <TouchableOpacity style={[styles.micBtn, isRecording && styles.micBtnActive]} onPress={isRecording ? stopRecording : startRecording}>
-              <Text style={[styles.micBtnText, isRecording && { color: '#fff' }]}>{isRecording ? 'Stop' : 'Mic'}</Text>
+              <Text style={[styles.micBtnText, isRecording && { color: '#fff' }]}>{isRecording ? 'Done' : 'Mic'}</Text>
             </TouchableOpacity>
             <TextInput style={styles.textInput} value={input} onChangeText={setInput} placeholder={isRecording ? 'Listening...' : 'Type or tap mic...'} placeholderTextColor={COLORS.textFaint} onSubmitEditing={() => sendMessage(input, messages, doctrine, activeJob)} returnKeyType="send" editable={!isRecording} />
             <TouchableOpacity style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]} onPress={() => sendMessage(input, messages, doctrine, activeJob)} disabled={!input.trim() || loading}>
