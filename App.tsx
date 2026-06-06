@@ -5,6 +5,7 @@ import {
   Platform, ActivityIndicator, Alert
 } from 'react-native';
 import { Audio } from 'expo-av';
+import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
 
 const API_URL = 'https://remy-nu.vercel.app';
@@ -41,9 +42,12 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false);
   const [doctrine, setDoctrine] = useState('');
   const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const [gpsEnabled, setGpsEnabled] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const gpsIntervalRef = useRef<any>(null);
+  const briefedJobsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setupAudio();
@@ -53,6 +57,58 @@ export default function App() {
   useEffect(() => {
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [messages]);
+
+  useEffect(() => {
+    if (gpsEnabled) startGPS();
+    else stopGPS();
+    return () => stopGPS();
+  }, [gpsEnabled, jobs]);
+
+  const startGPS = async () => {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') { setGpsEnabled(false); Alert.alert('GPS needed', 'Enable location to use auto-brief.'); return; }
+    gpsIntervalRef.current = setInterval(async () => {
+      try {
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        checkNearbyJobs(loc.coords.latitude, loc.coords.longitude);
+      } catch {}
+    }, 15000);
+  };
+
+  const stopGPS = () => {
+    if (gpsIntervalRef.current) { clearInterval(gpsIntervalRef.current); gpsIntervalRef.current = null; }
+  };
+
+  const getDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  };
+
+  const checkNearbyJobs = async (userLat: number, userLng: number) => {
+    for (const job of jobs) {
+      if (briefedJobsRef.current.has(job.id)) continue;
+      // Try to geocode the address
+      try {
+        const geo = await Location.geocodeAsync(job.address || '');
+        if (geo.length > 0) {
+          const dist = getDistance(userLat, userLng, geo[0].latitude, geo[0].longitude);
+          if (dist <= 400) {
+            briefedJobsRef.current.add(job.id);
+            setActiveJob(job);
+            setTab('voice');
+            sendMessage(
+              `I am pulling up to ${job.customer_name}${job.address ? ` at ${job.address}` : ''}. Auto-detected via GPS. Brief me fast.`,
+              messages, doctrine, job
+            );
+            break;
+          }
+        }
+      } catch {}
+    }
+  };
 
   const setupAudio = async () => {
     await Audio.requestPermissionsAsync();
@@ -358,6 +414,20 @@ export default function App() {
             <Text style={styles.settingsLabel}>JOBS LOADED</Text>
             <Text style={styles.settingsValue}>{jobs.length}</Text>
           </View>
+          <View style={[styles.settingsCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
+            <View>
+              <Text style={styles.settingsLabel}>GPS AUTO-BRIEF</Text>
+              <Text style={[styles.settingsValue, { fontSize: 12, color: COLORS.textFaint }]}>Auto-brief when near job address</Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setGpsEnabled(!gpsEnabled)}
+              style={{ backgroundColor: gpsEnabled ? COLORS.orange : 'rgba(255,255,255,0.06)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 }}
+            >
+              <Text style={{ color: gpsEnabled ? '#fff' : COLORS.textDim, fontSize: 13, fontWeight: '600' }}>
+                {gpsEnabled ? 'ON' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
           <TouchableOpacity style={styles.refreshBtn} onPress={loadData}>
             <Text style={styles.refreshBtnText}>Refresh Data</Text>
           </TouchableOpacity>
@@ -371,9 +441,6 @@ export default function App() {
       <View style={styles.tabBar}>
         {(['voice', 'jobs', 'settings'] as Tab[]).map(t => (
           <TouchableOpacity key={t} style={styles.tabBtn} onPress={() => setTab(t)}>
-            <Text style={[styles.tabIcon, tab === t && styles.tabIconActive]}>
-              {t === 'voice' ? 'MIC' : t === 'jobs' ? 'JOBS' : 'SET'}
-            </Text>
             <Text style={[styles.tabLabel, tab === t && styles.tabLabelActive]}>
               {t === 'voice' ? 'Remy' : t === 'jobs' ? 'Jobs' : 'Settings'}
             </Text>
