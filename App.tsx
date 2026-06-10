@@ -56,6 +56,7 @@ export default function App() {
   const recordingRef = useRef<Audio.Recording | null>(null);
   const gpsIntervalRef = useRef<any>(null);
   const briefedJobsRef = useRef<Set<string>>(new Set());
+  const geocodeCacheRef = useRef<Map<string, {lat: number; lng: number} | null>>(new Map());
 
   useEffect(() => {
     setupAudio();
@@ -157,19 +158,23 @@ export default function App() {
   };
 
   const geocodeAddress = async (address: string): Promise<{lat: number; lng: number} | null> => {
+    const cached = geocodeCacheRef.current.get(address);
+    if (cached !== undefined) return cached;
     try {
-      const res = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=AIzaSyAKYAeRgXOh0tooiOeimdZMT0p0b0HiLdg`);
+      const res = await fetch(`${API_URL}/api/geo?action=geocode&address=${encodeURIComponent(address)}`);
       const data = await res.json();
-      if (data.results?.[0]) return data.results[0].geometry.location;
+      const location = data.location || null;
+      geocodeCacheRef.current.set(address, location);
+      return location;
     } catch {}
     return null;
   };
 
   const getNearbyFood = async (lat: number, lng: number): Promise<string> => {
     try {
-      const res = await fetch(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=3000&type=restaurant&key=AIzaSyAKYAeRgXOh0tooiOeimdZMT0p0b0HiLdg`);
+      const res = await fetch(`${API_URL}/api/geo?action=nearby&lat=${lat}&lng=${lng}&type=restaurant`);
       const data = await res.json();
-      const places = data.results?.slice(0, 3).map((p: any) => `${p.name} (${p.vicinity})`).join(', ');
+      const places = data.places?.slice(0, 3).map((p: any) => `${p.name} (${p.vicinity})`).join(', ');
       return places || '';
     } catch { return ''; }
   };
