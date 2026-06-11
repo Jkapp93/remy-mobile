@@ -9,6 +9,11 @@ import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
 
 const API_URL = 'https://remy-nu.vercel.app';
+// Shared token for this internal field app — must match MOBILE_API_TOKEN
+// in the Remy Vercel project. Identifies the app to /api/jobs,
+// /api/doctrine-list, and /api/chat (which returns JSON for this caller).
+const MOBILE_API_TOKEN = 'rmt_c31bb3dfdd42c99783497422897aabcf344a96567c8a4ac35fb5dff3e67fa29f';
+const AUTH_HEADERS = { Authorization: `Bearer ${MOBILE_API_TOKEN}` };
 
 const VOICES = [
   { id: 'f786b574-daa5-4673-aa0c-cbe3e8534c02', name: 'Remy' },
@@ -120,8 +125,8 @@ export default function App() {
   const loadData = async () => {
     try {
       const [jobData, docData] = await Promise.all([
-        fetch(`${API_URL}/api/jobs`).then(r => r.json()).catch(() => ({ jobs: [] })),
-        fetch(`${API_URL}/api/doctrine-list`).then(r => r.json()).catch(() => ({ doctrine: '' })),
+        fetch(`${API_URL}/api/jobs`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ jobs: [] })),
+        fetch(`${API_URL}/api/doctrine-list`, { headers: AUTH_HEADERS }).then(r => r.json()).catch(() => ({ doctrine: '' })),
       ]);
       if (jobData.jobs) setJobs(jobData.jobs);
       if (docData.doctrine) setDoctrine(docData.doctrine);
@@ -246,7 +251,7 @@ export default function App() {
     try {
       const res = await fetch(`${API_URL}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
         body: JSON.stringify({ messages: newMessages, doctrine: currentDoctrine, jobContext }),
       });
       const data = await res.json();
