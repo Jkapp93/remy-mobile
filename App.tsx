@@ -270,7 +270,7 @@ export default function App() {
       setIsSpeaking(true);
       const res = await fetch(`${API_URL}/api/voice`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS },
         body: JSON.stringify({ text, voiceId: selectedVoice }),
       });
       if (!res.ok) { setIsSpeaking(false); return; }
@@ -337,7 +337,7 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('audio', { uri, type: 'audio/m4a', name: 'recording.m4a' } as any);
-      const res = await fetch(`${API_URL}/api/transcribe`, { method: 'POST', body: formData });
+      const res = await fetch(`${API_URL}/api/transcribe`, { method: 'POST', headers: AUTH_HEADERS, body: formData });
       const data = await res.json();
       if (data.text) await sendMessage(data.text, messages, doctrine, activeJob);
       else setLoading(false);
