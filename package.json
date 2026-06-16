@@ -9,9 +9,11 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@siteed/audio-studio": "^3.2.0",
     "@supabase/supabase-js": "^2.107.0",
     "expo": "~54.0.34",
     "expo-av": "~16.0.8",
+    "expo-constants": "^56.0.18",
     "expo-location": "~19.0.8",
     "expo-notifications": "~0.32.17",
     "expo-secure-store": "~15.0.8",

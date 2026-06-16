@@ -28,9 +28,11 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      "@siteed/audio-studio"
     ],
     "extra": {
+      "remyRealtimeWsUrl": "wss://remy-realtime-gateway.onrender.com/voice",
       "eas": {
         "projectId": "10191f67-fdd6-4ddd-a3d8-69d3376ea981"
       }

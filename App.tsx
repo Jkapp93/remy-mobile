@@ -5,10 +5,22 @@ import {
   Platform, ActivityIndicator, Alert
 } from 'react-native';
 import { Audio } from 'expo-av';
+import Constants from 'expo-constants';
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
+import { createRealtimeFieldVoice } from './src/voice/realtimeFieldVoice';
 
 const API_URL = 'https://remy-nu.vercel.app';
+const REALTIME_WS_URL =
+  process.env.EXPO_PUBLIC_REMY_REALTIME_WS_URL ||
+  (Constants.expoConfig?.extra?.remyRealtimeWsUrl as string | undefined) ||
+  '';
+const MAX_RECORDING_MS = 30000;
+const HANDS_FREE_MAX_RECORDING_MS = 12000;
+const MIN_RECORDING_MS = 700;
+const SILENCE_STOP_MS = 1400;
+const SILENCE_ARM_MS = 2200;
+const SPEECH_LEVEL_DB = -46;
 // Shared token for this internal field app — must match MOBILE_API_TOKEN
 // in the Remy Vercel project. Identifies the app to /api/jobs,
 // /api/doctrine-list, and /api/chat (which returns JSON for this caller).
@@ -56,9 +68,22 @@ export default function App() {
   const [doctrine, setDoctrine] = useState('');
   const [gpsEnabled, setGpsEnabled] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState(VOICES[0].id);
+  const [voiceStatus, setVoiceStatus] = useState('');
+  const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
+  const [realtimeActive, setRealtimeActive] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const realtimeVoiceRef = useRef<ReturnType<typeof createRealtimeFieldVoice> | null>(null);
+  const messagesRef = useRef<Message[]>([]);
+  const doctrineRef = useRef('');
+  const activeJobRef = useRef<Job | null>(null);
+  const autoStopTimerRef = useRef<any>(null);
+  const meterIntervalRef = useRef<any>(null);
+  const recordingStartedAtRef = useRef(0);
+  const lastVoiceAtRef = useRef(0);
+  const heardSpeechRef = useRef(false);
+  const handsFreeRef = useRef(false);
   const gpsIntervalRef = useRef<any>(null);
   const briefedJobsRef = useRef<Set<string>>(new Set());
   const geocodeCacheRef = useRef<Map<string, {lat: number; lng: number} | null>>(new Map());
@@ -67,6 +92,13 @@ export default function App() {
     setupAudio();
     loadSavedToken();
     loadSavedVoice();
+    return () => {
+      if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+      if (meterIntervalRef.current) clearInterval(meterIntervalRef.current);
+      realtimeVoiceRef.current?.stop().catch(() => {});
+      soundRef.current?.unloadAsync().catch(() => {});
+      recordingRef.current?.stopAndUnloadAsync().catch(() => {});
+    };
   }, []);
 
   useEffect(() => {
@@ -79,15 +111,43 @@ export default function App() {
     return () => stopGPS();
   }, [gpsEnabled, jobs]);
 
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    doctrineRef.current = doctrine;
+  }, [doctrine]);
+
+  useEffect(() => {
+    activeJobRef.current = activeJob;
+  }, [activeJob]);
+
+  useEffect(() => {
+    handsFreeRef.current = handsFreeEnabled;
+    if (!handsFreeEnabled || realtimeActive || isRecording || isSpeaking || loading) return;
+
+    setVoiceStatus('Hands-free armed');
+    const timer = setTimeout(() => {
+      if (handsFreeRef.current && !recordingRef.current && !isSpeaking && !loading) {
+        startRecording(true);
+      }
+    }, 700);
+
+    return () => clearTimeout(timer);
+  }, [handsFreeEnabled, isRecording, isSpeaking, loading]);
+
   const setupAudio = async () => {
-    await Audio.requestPermissionsAsync();
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-      shouldDuckAndroid: true,
-      staysActiveInBackground: true,
-      playThroughEarpieceAndroid: false,
-    });
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+        staysActiveInBackground: false,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch {}
   };
 
   const loadSavedVoice = async () => {
@@ -243,7 +303,7 @@ export default function App() {
 
   const sendMessage = async (text: string, currentMessages: Message[], currentDoctrine: string, currentJob: Job | null) => {
     if (!text.trim()) return;
-    const jobContext = currentJob ? `Customer: ${currentJob.customer_name}\nAddress: ${currentJob.address || 'Not provided'}\nNotes: ${currentJob.notes || 'None'}\nJob type: ${currentJob.job_type || 'General'}` : '';
+    const jobContext = buildJobContext(currentJob);
     const newMessages: Message[] = [...currentMessages, { role: 'user', content: text }];
     setMessages(newMessages);
     setInput('');
@@ -298,28 +358,88 @@ export default function App() {
     setIsSpeaking(false);
   };
 
-  const startRecording = async () => {
+  const startRecording = async (auto = false) => {
     try {
+      if (loading || isRecording) return;
+      const handsFree = auto || handsFreeRef.current;
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
+        if (handsFree) {
+          handsFreeRef.current = false;
+          setHandsFreeEnabled(false);
+        }
+        Alert.alert('Microphone needed', 'Enable microphone access so Remy can listen.');
+        return;
+      }
       if (isSpeaking) await stopSpeaking();
+      if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+      if (meterIntervalRef.current) clearInterval(meterIntervalRef.current);
       await Audio.setAudioModeAsync({ 
         allowsRecordingIOS: true, 
         playsInSilentModeIOS: true,
+        shouldDuckAndroid: false,
+        staysActiveInBackground: false,
         playThroughEarpieceAndroid: false,
       });
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      const { recording } = await Audio.Recording.createAsync({
+        ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+        isMeteringEnabled: true,
+      } as any);
       recordingRef.current = recording;
+      recordingStartedAtRef.current = Date.now();
+      lastVoiceAtRef.current = Date.now();
+      heardSpeechRef.current = false;
       setIsRecording(true);
-      // Auto-stop after 8 seconds
-      setTimeout(async () => {
+      setVoiceStatus(handsFree ? 'Hands-free listening...' : 'Listening... tap Done when finished');
+      autoStopTimerRef.current = setTimeout(async () => {
         if (recordingRef.current) await stopRecording();
-      }, 8000);
-    } catch { Alert.alert('Error', 'Could not start recording.'); }
+      }, handsFree ? HANDS_FREE_MAX_RECORDING_MS : MAX_RECORDING_MS);
+
+      meterIntervalRef.current = setInterval(async () => {
+        try {
+          if (recordingRef.current !== recording) return;
+          const status: any = await recording.getStatusAsync();
+          const metering = status?.metering;
+          const elapsed = Date.now() - recordingStartedAtRef.current;
+
+          if (typeof metering !== 'number') {
+            heardSpeechRef.current = true;
+            return;
+          }
+
+          if (metering > SPEECH_LEVEL_DB) {
+            heardSpeechRef.current = true;
+            lastVoiceAtRef.current = Date.now();
+          }
+
+          const readyForSilenceStop = handsFree && heardSpeechRef.current && elapsed > SILENCE_ARM_MS;
+          const silentLongEnough = Date.now() - lastVoiceAtRef.current > SILENCE_STOP_MS;
+          if (readyForSilenceStop && silentLongEnough) await stopRecording();
+        } catch {}
+      }, 250);
+    } catch {
+      setVoiceStatus('');
+      Alert.alert('Error', 'Could not start recording.');
+    }
   };
 
   const stopRecording = async () => {
     if (!recordingRef.current) return;
+    if (autoStopTimerRef.current) {
+      clearTimeout(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
+    }
+    if (meterIntervalRef.current) {
+      clearInterval(meterIntervalRef.current);
+      meterIntervalRef.current = null;
+    }
+    const elapsed = Date.now() - recordingStartedAtRef.current;
     setIsRecording(false);
+    setVoiceStatus('Transcribing...');
     try {
+      if (elapsed < MIN_RECORDING_MS) {
+        await new Promise(resolve => setTimeout(resolve, MIN_RECORDING_MS - elapsed));
+      }
       await recordingRef.current.stopAndUnloadAsync();
       await Audio.setAudioModeAsync({ 
         allowsRecordingIOS: false, 
@@ -328,21 +448,113 @@ export default function App() {
       });
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
+      if (handsFreeRef.current && !heardSpeechRef.current) {
+        setVoiceStatus('');
+        return;
+      }
       if (uri) await transcribeAudio(uri);
-    } catch { recordingRef.current = null; }
+      else {
+        setVoiceStatus('');
+        if (!handsFreeRef.current) Alert.alert('No audio captured', 'Try again and speak after the Listening status appears.');
+      }
+    } catch {
+      recordingRef.current = null;
+      setVoiceStatus('');
+      if (!handsFreeRef.current) Alert.alert('Recording issue', 'Remy could not save that recording. Try again.');
+    }
   };
 
   const transcribeAudio = async (uri: string) => {
     setLoading(true);
+    setVoiceStatus('Transcribing...');
     try {
       const formData = new FormData();
       formData.append('audio', { uri, type: 'audio/m4a', name: 'recording.m4a' } as any);
       const res = await fetch(`${API_URL}/api/transcribe`, { method: 'POST', headers: AUTH_HEADERS, body: formData });
+      if (!res.ok) {
+        if (!handsFreeRef.current) Alert.alert('Could not transcribe', 'Remy had trouble hearing that. Try again closer to the phone.');
+        setLoading(false);
+        setVoiceStatus('');
+        return;
+      }
       const data = await res.json();
-      if (data.text) await sendMessage(data.text, messages, doctrine, activeJob);
-      else setLoading(false);
-    } catch { setLoading(false); }
+      const text = String(data.text || '').trim();
+      if (text) await sendMessage(text, messages, doctrine, activeJob);
+      else {
+        if (!handsFreeRef.current) Alert.alert('No speech detected', 'I did not catch words in that recording. Try again with less background noise.');
+        setLoading(false);
+      }
+    } catch {
+      setLoading(false);
+      if (!handsFreeRef.current) Alert.alert('Connection issue', 'Remy could not upload that recording.');
+    } finally {
+      setVoiceStatus('');
+    }
   };
+
+  const toggleHandsFree = async () => {
+    const next = !handsFreeRef.current;
+    handsFreeRef.current = next;
+    setHandsFreeEnabled(next);
+    setTab('voice');
+
+    if (next) {
+      setVoiceStatus('Hands-free armed');
+      if (REALTIME_WS_URL) {
+        try {
+          const realtimeVoice = createRealtimeFieldVoice({
+            wsUrl: REALTIME_WS_URL,
+            mobileApiToken: MOBILE_API_TOKEN,
+            getContext: () => ({
+              messages: messagesRef.current,
+              doctrine: doctrineRef.current,
+              jobContext: buildJobContext(activeJobRef.current),
+              voiceId: selectedVoice,
+            }),
+            onEvent: async (event) => {
+              if (event.type === 'status') setVoiceStatus(event.status);
+              if (event.type === 'error') setVoiceStatus(event.message);
+              if (event.type === 'user_transcript' && event.final) {
+                setMessages(prev => [...prev, { role: 'user', content: event.text }]);
+              }
+              if (event.type === 'assistant_text') {
+                setMessages(prev => [...prev, { role: 'assistant', content: event.text }]);
+                await speakText(event.text);
+              }
+            },
+          });
+          realtimeVoiceRef.current = realtimeVoice;
+          setRealtimeActive(true);
+          await realtimeVoice.start();
+          return;
+        } catch {
+          setRealtimeActive(false);
+          realtimeVoiceRef.current = null;
+          setVoiceStatus('Realtime unavailable; using hands-free fallback');
+        }
+      }
+      if (!isRecording && !isSpeaking && !loading) {
+        setTimeout(() => {
+          if (handsFreeRef.current && !recordingRef.current && !isSpeaking && !loading) startRecording(true);
+        }, 500);
+      }
+      return;
+    }
+
+    setVoiceStatus('');
+    setRealtimeActive(false);
+    if (realtimeVoiceRef.current) {
+      await realtimeVoiceRef.current.stop();
+      realtimeVoiceRef.current = null;
+    }
+    if (recordingRef.current) await stopRecording();
+  };
+
+  const buildJobContext = (job: Job | null) => (
+    job
+      ? `Customer: ${job.customer_name}\nAddress: ${job.address || 'Not provided'}\nNotes: ${job.notes || 'None'}\nJob type: ${job.job_type || 'General'}`
+      : ''
+  );
 
   const selectJob = (job: Job) => {
     setActiveJob(job);
@@ -398,7 +610,8 @@ export default function App() {
               <Text style={[styles.statusText, { color: COLORS.green }]}>Speaking (stop)</Text>
             </TouchableOpacity>
           )}
-          {isRecording && <Text style={[styles.statusText, { color: COLORS.orange }]}>Listening...</Text>}
+          {isRecording && <Text style={[styles.statusText, { color: COLORS.orange }]}>{handsFreeEnabled ? 'Hands-free' : 'Listening...'}</Text>}
+          {!isRecording && voiceStatus && <Text style={[styles.statusText, { color: COLORS.orange }]}>{voiceStatus}</Text>}
           {activeJob && !isSpeaking && !isRecording && (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
               <View style={[styles.jobPill, { borderColor: (JOB_TYPE_COLORS[activeJob.job_type] || COLORS.orange) + '44' }]}>
@@ -413,6 +626,9 @@ export default function App() {
       {/* Brief buttons */}
       {tab === 'voice' && !isSpeaking && !isRecording && (
         <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: COLORS.border }}>
+          <TouchableOpacity onPress={toggleHandsFree} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: handsFreeEnabled ? COLORS.orange : COLORS.orangeDim, borderWidth: 1, borderColor: handsFreeEnabled ? COLORS.orange : COLORS.orangeBorder }}>
+            <Text style={{ color: handsFreeEnabled ? '#fff' : COLORS.orange, fontSize: 12, fontWeight: '700' }}>{handsFreeEnabled ? 'Hands-free ON' : 'Hands-free'}</Text>
+          </TouchableOpacity>
           {activeJob ? (
             <TouchableOpacity onPress={briefActiveJob} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: COLORS.orangeDim, borderWidth: 1, borderColor: COLORS.orangeBorder }}>
               <Text style={{ color: COLORS.orange, fontSize: 12, fontWeight: '600' }}>Brief Me</Text>
@@ -447,10 +663,10 @@ export default function App() {
             )}
           </ScrollView>
           <View style={styles.inputBar}>
-            <TouchableOpacity style={[styles.micBtn, isRecording && styles.micBtnActive]} onPress={isRecording ? stopRecording : startRecording}>
-              <Text style={[styles.micBtnText, isRecording && { color: '#fff' }]}>{isRecording ? 'Done' : 'Mic'}</Text>
+            <TouchableOpacity style={[styles.micBtn, isRecording && styles.micBtnActive, loading && !isRecording && { opacity: 0.45 }]} onPress={isRecording ? stopRecording : startRecording} disabled={loading && !isRecording}>
+              <Text style={[styles.micBtnText, isRecording && { color: '#fff' }]}>{isRecording ? 'Done' : loading ? '...' : 'Mic'}</Text>
             </TouchableOpacity>
-            <TextInput style={styles.textInput} value={input} onChangeText={setInput} placeholder={isRecording ? 'Listening...' : 'Type or tap mic...'} placeholderTextColor={COLORS.textFaint} onSubmitEditing={() => sendMessage(input, messages, doctrine, activeJob)} returnKeyType="send" editable={!isRecording} />
+            <TextInput style={styles.textInput} value={input} onChangeText={setInput} placeholder={isRecording ? (handsFreeEnabled ? 'Hands-free listening...' : 'Listening... tap Done when finished') : voiceStatus || 'Type or tap mic...'} placeholderTextColor={COLORS.textFaint} onSubmitEditing={() => sendMessage(input, messages, doctrine, activeJob)} returnKeyType="send" editable={!isRecording && !handsFreeEnabled} />
             <TouchableOpacity style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]} onPress={() => sendMessage(input, messages, doctrine, activeJob)} disabled={!input.trim() || loading}>
               <Text style={styles.sendBtnText}>Send</Text>
             </TouchableOpacity>
